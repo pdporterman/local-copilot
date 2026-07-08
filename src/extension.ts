@@ -17,18 +17,16 @@ export function activate(context: vscode.ExtensionContext) {
 
 class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   private currentChatId: string = 'default';
-  private chats: Map<string, any[]> = new Map();
+  private chats: Map<string, { title: string; messages: any[] }> = new Map();
 
   constructor(private readonly _extensionUri: vscode.Uri, private context: vscode.ExtensionContext) {
     this.loadChats();
   }
 
   private loadChats() {
-    const saved = this.context.globalState.get<Record<string, any[]>>('localLLM.chats');
+    const saved = this.context.globalState.get<Record<string, {title: string, messages: any[] }>>('localLLM.chats');
     if (saved) {
       this.chats = new Map(Object.entries(saved));
-    } else {
-      this.chats.set('default', []);
     }
     this.currentChatId = 'default';
   }
@@ -38,11 +36,11 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   }
 
   private sendChatList(webviewView: vscode.WebviewView) {
-  webviewView.webview.postMessage({ 
-    command: 'renderChats', 
-    chats: Object.fromEntries(this.chats) 
-  });
-}
+    webviewView.webview.postMessage({ 
+      command: 'renderChats', 
+      chats: Object.fromEntries(this.chats) 
+    });
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView) {
     webviewView.webview.options = { enableScripts: true };
@@ -53,93 +51,114 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.command) {
         case 'sendPrompt':
+          // Create persistent chat only on first real message
+          if (!this.chats.has(this.currentChatId) || this.chats.get(this.currentChatId)!.messages.length === 0) {
+            this.currentChatId = `chat-${Date.now()}`;
+            this.chats.set(this.currentChatId, { 
+              title: message.prompt.length > 60 ? message.prompt.substring(0, 57) + '...' : message.prompt, 
+              messages: [] 
+            });
+          }
+
           const userMsg = { role: 'user', content: message.prompt, timestamp: Date.now() };
           this.addMessageToCurrentChat(userMsg);
-          
+
           const responseText = await this.callLLM(message.prompt);
           const assistantMsg = { role: 'assistant', content: responseText, timestamp: Date.now() };
           this.addMessageToCurrentChat(assistantMsg);
 
+          if (this.chats.get(this.currentChatId)!.messages.length === 2) {
+            this.generateBetterTitle(this.currentChatId, message.prompt, webviewView);
+          }
+
           webviewView.webview.postMessage({ command: 'response', text: responseText });
+          this.sendChatList(webviewView);
           break;
 
         case 'loadChat':
           this.currentChatId = message.chatId;
+          const chat = this.chats.get(this.currentChatId);
           webviewView.webview.postMessage({ 
             command: 'loadChat', 
-            messages: this.chats.get(this.currentChatId) || [] 
+            messages: chat ? chat.messages : [],
+            chatId: this.currentChatId 
           });
+          this.sendChatList(webviewView);
           break;
 
         case 'newChat':
-          this.currentChatId = `chat-${Date.now()}`;
-          this.chats.set(this.currentChatId, []);
-          this.saveChats();
-          webviewView.webview.postMessage({ 
-            command: 'newChat', 
-            chatId: this.currentChatId,
-            messages: [] 
-          });
+          this.currentChatId = `chat-${Date.now()}`; // temporary until first message
+          webviewView.webview.postMessage({ command: 'newChat', chatId: this.currentChatId });
+          break;
+
+        case 'deleteChat':
+          if (message.chatId && this.chats.has(message.chatId)) {
+            this.chats.delete(message.chatId);
+            if (this.currentChatId === message.chatId) this.currentChatId = 'default';
+            this.saveChats();
+            this.sendChatList(webviewView);
+          }
           break;
       }
     });
   }
 
   private addMessageToCurrentChat(msg: any) {
-    if (!this.chats.has(this.currentChatId)) this.chats.set(this.currentChatId, []);
-    this.chats.get(this.currentChatId)!.push(msg);
+    if (!this.chats.has(this.currentChatId)) {
+      this.chats.set(this.currentChatId, { title: 'New Chat', messages: [] });
+    }
+    this.chats.get(this.currentChatId)!.messages.push(msg);
     this.saveChats();
   }
 
- private _getHtmlForWebview(webview: vscode.Webview): string {
-  const nonce = this.getNonce();
-  return `<!DOCTYPE html>
+  private async generateBetterTitle(chatId: string, firstPrompt: string, webviewView: vscode.WebviewView) {
+    try {
+      const summary = await this.callLLM(`Give a short 4-6 word title for this chat: "${firstPrompt}"`);
+      if (this.chats.has(chatId)) {
+        this.chats.get(chatId)!.title = summary.trim().replace(/^"|"$/g, '').substring(0, 60);
+        this.saveChats();
+        this.sendChatList(webviewView);
+      }
+    } catch (e) {}
+  }
+
+  private _getHtmlForWebview(webview: vscode.Webview): string {
+    const nonce = this.getNonce();
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-inline';">
   <style>
-    body { 
-      margin:0; padding:0; font-family: var(--vscode-font-family); 
-      background: var(--vscode-editor-background); 
-      color: var(--vscode-editor-foreground); 
-      height:100vh; display:flex; 
-    }
-    #sidebar { 
-      width: 240px; border-right: 1px solid #444; padding: 12px; overflow-y: auto; 
-    }
-    #main { flex: 1; display: flex; flex-direction: column; }
-    #chat-container { 
-      flex: 1; overflow-y: auto; padding: 15px; display: flex; flex-direction: column; gap: 12px; 
-    }
-    .message { 
-      max-width: 80%; padding: 12px 16px; border-radius: 18px; line-height: 1.5; 
-    }
-    .user { align-self: flex-end; background: #007acc; color: white; }
-    .assistant { align-self: flex-start; background: #2d2d2d; }
-    .chat-item { 
-      padding: 10px; cursor: pointer; border-radius: 6px; margin-bottom: 6px; 
-    }
-    .chat-item:hover, .chat-item.active { background: #2d2d2d; }
-    #input-area { 
-      padding: 12px; border-top: 1px solid #444; display: flex; gap: 8px; 
-    }
-    #prompt { 
-      flex: 1; padding: 10px 14px; border-radius: 20px; 
-      background: var(--vscode-input-background); 
-      color: var(--vscode-input-foreground); border: none; 
-    }
-    button { 
-      padding: 10px 20px; border-radius: 20px; background: #007acc; color: white; border: none; cursor: pointer; 
-    }
+    body { margin:0; padding:0; font-family:var(--vscode-font-family); background:var(--vscode-editor-background); color:var(--vscode-editor-foreground); height:100vh; overflow:hidden; }
+    #menu, #chat-screen { height:100%; display:flex; flex-direction:column; }
+    #chat-screen { display:none; }
+    .header { padding:12px; border-bottom:1px solid #444; display:flex; align-items:center; gap:10px; }
+    .back-btn { font-size:20px; cursor:pointer; padding:0 8px; }
+    #chat-container { flex:1; overflow-y:auto; padding:15px; display:flex; flex-direction:column; gap:12px; }
+    .message { max-width:80%; padding:12px 16px; border-radius:18px; line-height:1.5; }
+    .user { align-self:flex-end; background:#007acc; color:white; }
+    .assistant { align-self:flex-start; background:#2d2d2d; }
+    .chat-item { padding:12px; cursor:pointer; border-radius:6px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center; }
+    .chat-item:hover { background:#2d2d2d; }
+    .delete-btn { color:#ff5555; cursor:pointer; font-size:18px; padding:0 8px; }
+    #input-area { padding:12px; border-top:1px solid #444; display:flex; gap:8px; }
+    #prompt { flex:1; padding:10px 14px; border-radius:20px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:none; }
+    button { padding:10px 20px; border-radius:20px; background:#007acc; color:white; border:none; cursor:pointer; }
   </style>
 </head>
 <body>
-  <div id="sidebar">
-    <button onclick="newChat()" style="width:100%; margin-bottom:15px; padding:12px;">+ New Chat</button>
-    <div id="chat-list"></div>
+  <div id="menu">
+    <div class="header"><h3>Chats</h3></div>
+    <button onclick="newChat()" style="margin:12px;width:calc(100% - 24px);">+ New Chat</button>
+    <div id="chat-list" style="padding:0 12px;"></div>
   </div>
-  <div id="main">
+
+  <div id="chat-screen">
+    <div class="header">
+      <span class="back-btn" onclick="showMenu()">←</span>
+      <h3 id="chat-title">Chat</h3>
+    </div>
     <div id="chat-container"></div>
     <div id="input-area">
       <textarea id="prompt" rows="1" placeholder="Type a message..."></textarea>
@@ -151,15 +170,39 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     const vscode = acquireVsCodeApi();
     let currentChatId = 'default';
 
+    function showMenu() {
+      document.getElementById('menu').style.display = 'flex';
+      document.getElementById('chat-screen').style.display = 'none';
+      vscode.postMessage({command: 'refreshMenu'});
+    }
+
+    function showChat() {
+      document.getElementById('menu').style.display = 'none';
+      document.getElementById('chat-screen').style.display = 'flex';
+    }
+
     function renderChatList(chats) {
       const container = document.getElementById('chat-list');
       container.innerHTML = '';
       Object.keys(chats).forEach(id => {
+        const chat = chats[id];
         const item = document.createElement('div');
         item.className = 'chat-item';
-        if (id === currentChatId) item.classList.add('active');
-        item.textContent = id === 'default' ? 'Default Chat' : 'Chat ' + new Date(parseInt(id.split('-')[1] || Date.now())).toLocaleString();
-        item.onclick = () => vscode.postMessage({command: 'loadChat', chatId: id});
+        item.innerHTML = \`
+          <span style="flex:1">\${chat.title || 'Untitled Chat'}</span>
+          <span class="delete-btn" style="padding:0 8px;">×</span>
+        \`;
+
+        // Click on the whole item to load chat
+        item.addEventListener('click', (e) => {
+          if (e.target.classList.contains('delete-btn')) {
+            deleteChat(id);
+          } else {
+            currentChatId = id;
+            vscode.postMessage({command: 'loadChat', chatId: id});
+          }
+        });
+
         container.appendChild(item);
       });
     }
@@ -177,29 +220,42 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       vscode.postMessage({command: 'newChat'});
     }
 
+    function deleteChat(chatId) {
+      if (confirm('Delete this chat?')) {
+        vscode.postMessage({command: 'deleteChat', chatId});
+      }
+    }
+
     window.addEventListener('message', (event) => {
       const msg = event.data;
       if (msg.command === 'response') {
         addMessage('assistant', msg.text);
       } else if (msg.command === 'loadChat') {
-        currentChatId = msg.chatId || currentChatId;
+        currentChatId = msg.chatId;
         document.getElementById('chat-container').innerHTML = '';
         (msg.messages || []).forEach(m => addMessage(m.role, m.content));
+        showChat();
       } else if (msg.command === 'newChat') {
         currentChatId = msg.chatId;
         document.getElementById('chat-container').innerHTML = '';
+        showChat();
       } else if (msg.command === 'renderChats') {
         renderChatList(msg.chats);
       }
     });
 
-    // Send message
     function sendPrompt() {
       const input = document.getElementById('prompt');
       if (input.value.trim()) {
         addMessage('user', input.value);
         vscode.postMessage({command: 'sendPrompt', prompt: input.value});
         input.value = '';
+      }
+    }
+
+    function deleteChat(chatId) {
+      if (confirm('Delete this chat permanently?')) {
+        vscode.postMessage({command: 'deleteChat', chatId: chatId});
       }
     }
 
@@ -211,13 +267,11 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    // Initial load
-    vscode.postMessage({command: 'loadChat', chatId: 'default'});
+    vscode.postMessage({command: 'refreshMenu'});
   </script>
 </body>
 </html>`;
-}
-
+  }
 
   private async callLLM(prompt: string): Promise<string> {
     try {
@@ -239,6 +293,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       return `Error: ${err.message}. Is Ollama running?`;
     }
   }
+
 
   private getNonce() {
     let text = '';
