@@ -24,7 +24,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   }
 
   private loadChats() {
-    const saved = this.context.globalState.get<Record<string, {title: string, messages: any[] }>>('localLLM.chats');
+    const saved = this.context.globalState.get<Record<string, { title: string, messages: any[] }>>('localLLM.chats');
     if (saved) {
       this.chats = new Map(Object.entries(saved));
     }
@@ -36,9 +36,9 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   }
 
   private sendChatList(webviewView: vscode.WebviewView) {
-    webviewView.webview.postMessage({ 
-      command: 'renderChats', 
-      chats: Object.fromEntries(this.chats) 
+    webviewView.webview.postMessage({
+      command: 'renderChats',
+      chats: Object.fromEntries(this.chats)
     });
   }
 
@@ -54,9 +54,9 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           // Create persistent chat only on first real message
           if (!this.chats.has(this.currentChatId) || this.chats.get(this.currentChatId)!.messages.length === 0) {
             this.currentChatId = `chat-${Date.now()}`;
-            this.chats.set(this.currentChatId, { 
-              title: message.prompt.length > 60 ? message.prompt.substring(0, 57) + '...' : message.prompt, 
-              messages: [] 
+            this.chats.set(this.currentChatId, {
+              title: message.prompt.length > 60 ? message.prompt.substring(0, 57) + '...' : message.prompt,
+              messages: []
             });
           }
 
@@ -78,10 +78,10 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
         case 'loadChat':
           this.currentChatId = message.chatId;
           const chat = this.chats.get(this.currentChatId);
-          webviewView.webview.postMessage({ 
-            command: 'loadChat', 
+          webviewView.webview.postMessage({
+            command: 'loadChat',
             messages: chat ? chat.messages : [],
-            chatId: this.currentChatId 
+            chatId: this.currentChatId
           });
           this.sendChatList(webviewView);
           break;
@@ -92,11 +92,15 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'deleteChat':
+          console.log('[BACKEND] Received deleteChat request for:', message.chatId);
           if (message.chatId && this.chats.has(message.chatId)) {
             this.chats.delete(message.chatId);
             if (this.currentChatId === message.chatId) this.currentChatId = 'default';
             this.saveChats();
             this.sendChatList(webviewView);
+            console.log('[BACKEND] ✅ Chat successfully deleted:', message.chatId);
+          } else {
+            console.log('[BACKEND] ❌ Delete failed - chat not found');
           }
           break;
       }
@@ -119,7 +123,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
         this.saveChats();
         this.sendChatList(webviewView);
       }
-    } catch (e) {}
+    } catch (e) { }
   }
 
   private _getHtmlForWebview(webview: vscode.Webview): string {
@@ -158,6 +162,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     <div class="header">
       <span class="back-btn" onclick="showMenu()">←</span>
       <h3 id="chat-title">Chat</h3>
+      <button onclick="deleteCurrentChat()" style="margin-left:auto; background:#ff5555;">Delete</button>
     </div>
     <div id="chat-container"></div>
     <div id="input-area">
@@ -167,6 +172,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   </div>
 
   <script nonce="${nonce}">
+    console.log('=== WEBVIEW SCRIPT LOADED ===');
     const vscode = acquireVsCodeApi();
     let currentChatId = 'default';
 
@@ -184,25 +190,25 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     function renderChatList(chats) {
       const container = document.getElementById('chat-list');
       container.innerHTML = '';
-      Object.keys(chats).forEach(id => {
+      
+      const chatIds = Object.keys(chats);
+      chatIds.sort((a, b) => {
+        const timeA = parseInt(a.replace('chat-', '')) || 0;
+        const timeB = parseInt(b.replace('chat-', '')) || 0;
+        return timeB - timeA; // newest first
+      });
+      
+      chatIds.forEach(id => {
         const chat = chats[id];
         const item = document.createElement('div');
         item.className = 'chat-item';
-        item.innerHTML = \`
-          <span style="flex:1">\${chat.title || 'Untitled Chat'}</span>
-          <span class="delete-btn" style="padding:0 8px;">×</span>
-        \`;
-
-        // Click on the whole item to load chat
-        item.addEventListener('click', (e) => {
-          if (e.target.classList.contains('delete-btn')) {
-            deleteChat(id);
-          } else {
-            currentChatId = id;
-            vscode.postMessage({command: 'loadChat', chatId: id});
-          }
+        item.textContent = chat.title || 'Untitled Chat';
+        
+        item.addEventListener('click', () => {
+          currentChatId = id;
+          vscode.postMessage({command: 'loadChat', chatId: id});
         });
-
+        
         container.appendChild(item);
       });
     }
@@ -217,13 +223,14 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     }
 
     function newChat() {
+      console.log('new chat made');
       vscode.postMessage({command: 'newChat'});
     }
 
-    function deleteChat(chatId) {
-      if (confirm('Delete this chat?')) {
-        vscode.postMessage({command: 'deleteChat', chatId});
-      }
+    function deleteCurrentChat() {
+      console.log('Delete button clicked for chat:', currentChatId);
+      vscode.postMessage({command: 'deleteChat', chatId: currentChatId});
+      showMenu(); // Return to chat list
     }
 
     window.addEventListener('message', (event) => {
@@ -253,12 +260,6 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    function deleteChat(chatId) {
-      if (confirm('Delete this chat permanently?')) {
-        vscode.postMessage({command: 'deleteChat', chatId: chatId});
-      }
-    }
-
     document.getElementById('send').addEventListener('click', sendPrompt);
     document.getElementById('prompt').addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -267,6 +268,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       }
     });
 
+    console.log('=== WEBVIEW SCRIPT FINISHED LOADING ===');
     vscode.postMessage({command: 'refreshMenu'});
   </script>
 </body>
@@ -286,7 +288,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       });
 
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data:any = await response.json();
+      const data: any = await response.json();
       return data.message?.content || 'No response';
     } catch (err: any) {
       console.error(err);
