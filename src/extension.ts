@@ -24,7 +24,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   }
 
   private loadChats() {
-    const saved = this.context.globalState.get<Record<string, { title: string, messages: any[] }>>('localLLM.chats');
+    const saved = this.context.globalState.get<Record<string, {title: string, messages: any[] }>>('localLLM.chats');
     if (saved) {
       this.chats = new Map(Object.entries(saved));
     }
@@ -36,9 +36,9 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   }
 
   private sendChatList(webviewView: vscode.WebviewView) {
-    webviewView.webview.postMessage({
-      command: 'renderChats',
-      chats: Object.fromEntries(this.chats)
+    webviewView.webview.postMessage({ 
+      command: 'renderChats', 
+      chats: Object.fromEntries(this.chats) 
     });
   }
 
@@ -46,18 +46,22 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
 
-    this.sendChatList(webviewView);
+    const sendChats = () => this.sendChatList(webviewView);
+    sendChats();
+
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible) sendChats();
+    });
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
       switch (message.command) {
         case 'sendPrompt':
-          // Create persistent chat only on first real message
+          let isNewChat = false;
+
           if (!this.chats.has(this.currentChatId) || this.chats.get(this.currentChatId)!.messages.length === 0) {
+            isNewChat = true;
             this.currentChatId = `chat-${Date.now()}`;
-            this.chats.set(this.currentChatId, {
-              title: message.prompt.length > 60 ? message.prompt.substring(0, 57) + '...' : message.prompt,
-              messages: []
-            });
+            this.chats.set(this.currentChatId, { title: 'New Chat', messages: [] });
           }
 
           const userMsg = { role: 'user', content: message.prompt, timestamp: Date.now() };
@@ -67,40 +71,68 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           const assistantMsg = { role: 'assistant', content: responseText, timestamp: Date.now() };
           this.addMessageToCurrentChat(assistantMsg);
 
-          if (this.chats.get(this.currentChatId)!.messages.length === 2) {
-            this.generateBetterTitle(this.currentChatId, message.prompt, webviewView);
+          if (isNewChat) {
+            this.generateBetterTitle(this.currentChatId, webviewView);
           }
 
+          // Check for file write request
+          await this.handlePossibleFileWrite(responseText, webviewView);
+
           webviewView.webview.postMessage({ command: 'response', text: responseText });
+          this.sendChatList(webviewView);
+          break;
+
+        case 'readActiveFile':
+          const editor = vscode.window.activeTextEditor;
+          if (editor) {
+            const doc = editor.document;
+            const content = doc.getText();
+            const fileName = doc.fileName.split(/[/\\]/).pop() || 'file';
+
+            const fileInfo = `**File:** ${doc.fileName}\n\n\`\`\`\n${content}\n\`\`\``;
+            
+            const contextMsg = { 
+              role: 'user', 
+              content: `Here is the content of the currently open file "${fileName}":\n\n${fileInfo}\n\nWhat would you like to know or do with it?` 
+            };
+            
+            this.addMessageToCurrentChat(contextMsg);
+            
+            webviewView.webview.postMessage({ 
+              command: 'response', 
+              text: `✅ Loaded ${fileName} into context.` 
+            });
+          } else {
+            webviewView.webview.postMessage({ 
+              command: 'response', 
+              text: 'No active editor found. Open a file first.' 
+            });
+          }
           this.sendChatList(webviewView);
           break;
 
         case 'loadChat':
           this.currentChatId = message.chatId;
           const chat = this.chats.get(this.currentChatId);
-          webviewView.webview.postMessage({
-            command: 'loadChat',
+          webviewView.webview.postMessage({ 
+            command: 'loadChat', 
             messages: chat ? chat.messages : [],
-            chatId: this.currentChatId
+            chatId: this.currentChatId 
           });
           this.sendChatList(webviewView);
           break;
 
         case 'newChat':
-          this.currentChatId = `chat-${Date.now()}`; // temporary until first message
+          this.currentChatId = `chat-${Date.now()}`;
           webviewView.webview.postMessage({ command: 'newChat', chatId: this.currentChatId });
           break;
 
         case 'deleteChat':
-          console.log('[BACKEND] Received deleteChat request for:', message.chatId);
           if (message.chatId && this.chats.has(message.chatId)) {
             this.chats.delete(message.chatId);
             if (this.currentChatId === message.chatId) this.currentChatId = 'default';
             this.saveChats();
             this.sendChatList(webviewView);
-            console.log('[BACKEND] ✅ Chat successfully deleted:', message.chatId);
-          } else {
-            console.log('[BACKEND] ❌ Delete failed - chat not found');
           }
           break;
       }
@@ -115,15 +147,36 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     this.saveChats();
   }
 
-  private async generateBetterTitle(chatId: string, firstPrompt: string, webviewView: vscode.WebviewView) {
+  private async generateBetterTitle(chatId: string, webviewView?: vscode.WebviewView) {
     try {
-      const summary = await this.callLLM(`Give a short 4-6 word title for this chat: "${firstPrompt}"`);
+      const chat = this.chats.get(chatId);
+      if (!chat || chat.messages.length < 2) return;
+
+      const firstUserMsg = chat.messages.find(m => m.role === 'user');
+      if (!firstUserMsg) return;
+
+      const summaryPrompt = `Create a short 4-6 word title for this chat. Be specific. No quotes.
+
+User: ${firstUserMsg.content.substring(0, 300)}`;
+
+      const summary = await this.callLLM(summaryPrompt);
+      
       if (this.chats.has(chatId)) {
-        this.chats.get(chatId)!.title = summary.trim().replace(/^"|"$/g, '').substring(0, 60);
+        let cleanTitle = summary.trim()
+          .replace(/^["']|["']$/g, '')
+          .replace(/^Title:?\s*/i, '')
+          .substring(0, 60);
+        
+        this.chats.get(chatId)!.title = cleanTitle || 'New Chat';
         this.saveChats();
-        this.sendChatList(webviewView);
+
+        if (webviewView) {
+          this.sendChatList(webviewView);
+        }
       }
-    } catch (e) { }
+    } catch (e) {
+      console.error('Title generation failed:', e);
+    }
   }
 
   private _getHtmlForWebview(webview: vscode.Webview): string {
@@ -143,12 +196,12 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     .message { max-width:80%; padding:12px 16px; border-radius:18px; line-height:1.5; }
     .user { align-self:flex-end; background:#007acc; color:white; }
     .assistant { align-self:flex-start; background:#2d2d2d; }
-    .chat-item { padding:12px; cursor:pointer; border-radius:6px; margin-bottom:6px; display:flex; justify-content:space-between; align-items:center; }
+    .chat-item { padding:12px; cursor:pointer; border-radius:6px; margin-bottom:6px; }
     .chat-item:hover { background:#2d2d2d; }
-    .delete-btn { color:#ff5555; cursor:pointer; font-size:18px; padding:0 8px; }
     #input-area { padding:12px; border-top:1px solid #444; display:flex; gap:8px; }
     #prompt { flex:1; padding:10px 14px; border-radius:20px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:none; }
     button { padding:10px 20px; border-radius:20px; background:#007acc; color:white; border:none; cursor:pointer; }
+    #read-file { padding:8px 12px; background:#2d2d2d; border:none; border-radius:20px; cursor:pointer; font-size:16px; }
   </style>
 </head>
 <body>
@@ -162,24 +215,23 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     <div class="header">
       <span class="back-btn" onclick="showMenu()">←</span>
       <h3 id="chat-title">Chat</h3>
-      <button onclick="deleteCurrentChat()" style="margin-left:auto; background:#ff5555;">Delete</button>
+      <button onclick="deleteCurrentChat()" style="margin-left:auto; background:#ff5555; padding:5px 10px; font-size:12px;">🗑️ Delete</button>
     </div>
     <div id="chat-container"></div>
     <div id="input-area">
       <textarea id="prompt" rows="1" placeholder="Type a message..."></textarea>
       <button id="send">Send</button>
+      <button id="read-file" title="Read active file">📄</button>
     </div>
   </div>
 
   <script nonce="${nonce}">
-    console.log('=== WEBVIEW SCRIPT LOADED ===');
     const vscode = acquireVsCodeApi();
     let currentChatId = 'default';
 
     function showMenu() {
       document.getElementById('menu').style.display = 'flex';
       document.getElementById('chat-screen').style.display = 'none';
-      vscode.postMessage({command: 'refreshMenu'});
     }
 
     function showChat() {
@@ -190,25 +242,21 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     function renderChatList(chats) {
       const container = document.getElementById('chat-list');
       container.innerHTML = '';
-      
       const chatIds = Object.keys(chats);
       chatIds.sort((a, b) => {
         const timeA = parseInt(a.replace('chat-', '')) || 0;
         const timeB = parseInt(b.replace('chat-', '')) || 0;
-        return timeB - timeA; // newest first
+        return timeB - timeA;
       });
-      
       chatIds.forEach(id => {
         const chat = chats[id];
         const item = document.createElement('div');
         item.className = 'chat-item';
         item.textContent = chat.title || 'Untitled Chat';
-        
         item.addEventListener('click', () => {
           currentChatId = id;
           vscode.postMessage({command: 'loadChat', chatId: id});
         });
-        
         container.appendChild(item);
       });
     }
@@ -223,14 +271,12 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     }
 
     function newChat() {
-      console.log('new chat made');
       vscode.postMessage({command: 'newChat'});
     }
 
     function deleteCurrentChat() {
-      console.log('Delete button clicked for chat:', currentChatId);
       vscode.postMessage({command: 'deleteChat', chatId: currentChatId});
-      showMenu(); // Return to chat list
+      showMenu();
     }
 
     window.addEventListener('message', (event) => {
@@ -268,21 +314,48 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       }
     });
 
-    console.log('=== WEBVIEW SCRIPT FINISHED LOADING ===');
+    const readFileBtn = document.getElementById('read-file');
+    if (readFileBtn) {
+      readFileBtn.addEventListener('click', () => {
+        vscode.postMessage({command: 'readActiveFile'});
+      });
+    }
+
     vscode.postMessage({command: 'refreshMenu'});
   </script>
 </body>
 </html>`;
   }
 
-  private async callLLM(prompt: string): Promise<string> {
+  private async callLLM(userPrompt: string): Promise<string> {
     try {
+      const currentChat = this.chats.get(this.currentChatId);
+      const messages = currentChat ? currentChat.messages : [];
+
+      const systemMessage = {
+        role: 'system',
+        content: `You are a helpful coding assistant with file read/write capabilities.
+
+When the user asks you to create or update a file, respond with:
+WRITE TO FILE: path/to/file.ext
+\`\`\`language
+full code here
+\`\`\`
+
+Be precise and helpful.`
+      };
+
+      const ollamaMessages = [systemMessage, ...messages.map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }))];
+
       const response = await fetch('http://localhost:11434/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: 'qwen2.5-coder:7b',
-          messages: [{ role: 'user', content: prompt }],
+          messages: ollamaMessages,
           stream: false
         })
       });
@@ -296,6 +369,26 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handlePossibleFileWrite(responseText: string, webviewView: vscode.WebviewView): Promise<boolean> {
+    const writeMatch = responseText.match(/WRITE TO FILE:\s*([^\n]+)/i);
+    if (!writeMatch) return false;
+
+    const filePath = writeMatch[1].trim();
+    const codeBlockMatch = responseText.match(/```[\w]*\n([\s\S]*?)\n```/);
+
+    if (codeBlockMatch) {
+      const content = codeBlockMatch[1];
+      try {
+        const uri = vscode.Uri.file(filePath);
+        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+        webviewView.webview.postMessage({ command: 'response', text: `✅ Successfully wrote to: ${filePath}` });
+        return true;
+      } catch (err: any) {
+        webviewView.webview.postMessage({ command: 'response', text: `❌ Failed to write file: ${err.message}` });
+      }
+    }
+    return false;
+  }
 
   private getNonce() {
     let text = '';
