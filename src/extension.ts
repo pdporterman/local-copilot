@@ -68,17 +68,21 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           this.addMessageToCurrentChat(userMsg);
 
           const responseText = await this.callLLM(message.prompt);
-          const assistantMsg = { role: 'assistant', content: responseText, timestamp: Date.now() };
-          this.addMessageToCurrentChat(assistantMsg);
+
+          // Handle file operations silently
+          const fileOperationHandled = await this.handleFileOperation(responseText, webviewView);
+
+          // Only show AI response if no file operation was performed
+          if (!fileOperationHandled) {
+            const assistantMsg = { role: 'assistant', content: responseText, timestamp: Date.now() };
+            this.addMessageToCurrentChat(assistantMsg);
+            webviewView.webview.postMessage({ command: 'response', text: responseText });
+          }
 
           if (isNewChat) {
             this.generateBetterTitle(this.currentChatId, webviewView);
           }
 
-          // Check for file write request
-          await this.handlePossibleFileWrite(responseText, webviewView);
-
-          webviewView.webview.postMessage({ command: 'response', text: responseText });
           this.sendChatList(webviewView);
           break;
 
@@ -334,20 +338,23 @@ User: ${firstUserMsg.content.substring(0, 300)}`;
 
       const systemMessage = {
         role: 'system',
-        content: `You are a helpful coding assistant with file read/write capabilities.
+        content: `You are a concise coding assistant.
 
-When the user asks you to create or update a file, respond with:
-WRITE TO FILE: path/to/file.ext
-\`\`\`language
-full code here
+**Strict file rules:**
+- When creating or updating a file, respond with ONLY this format:
+
+WRITE TO FILE: filename.ext
+\`\`\`
+full file content here
 \`\`\`
 
-Be precise and helpful.`
+- Do not add extra explanation before or after the WRITE TO FILE block unless the user explicitly asks for it.
+- Be brief. No unnecessary commentary.`
       };
 
-      const ollamaMessages = [systemMessage, ...messages.map(msg => ({
-        role: msg.role,
-        content: msg.content
+      const ollamaMessages = [systemMessage, ...messages.map(m => ({
+        role: m.role,
+        content: m.content
       }))];
 
       const response = await fetch('http://localhost:11434/api/chat', {
@@ -369,25 +376,56 @@ Be precise and helpful.`
     }
   }
 
-  private async handlePossibleFileWrite(responseText: string, webviewView: vscode.WebviewView): Promise<boolean> {
-    const writeMatch = responseText.match(/WRITE TO FILE:\s*([^\n]+)/i);
-    if (!writeMatch) return false;
+  private async handleFileOperation(responseText: string, webviewView: vscode.WebviewView): Promise<boolean> {
+    // === FULL FILE WRITE ===
+    const writeMatch = responseText.match(/WRITE TO FILE:\s*([^\r\n]+)/i);
+    if (writeMatch) {
+      const rawPath = writeMatch[1].trim();
+      const codeBlockMatch = responseText.match(/```[\w]*\s*\n([\s\S]*?)\n```/);
 
-    const filePath = writeMatch[1].trim();
-    const codeBlockMatch = responseText.match(/```[\w]*\n([\s\S]*?)\n```/);
+      if (codeBlockMatch) {
+        const content = codeBlockMatch[1];
+        let targetPath = rawPath;
 
-    if (codeBlockMatch) {
-      const content = codeBlockMatch[1];
-      try {
-        const uri = vscode.Uri.file(filePath);
-        await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
-        webviewView.webview.postMessage({ command: 'response', text: `✅ Successfully wrote to: ${filePath}` });
-        return true;
-      } catch (err: any) {
-        webviewView.webview.postMessage({ command: 'response', text: `❌ Failed to write file: ${err.message}` });
+        try {
+          // Resolve relative path to workspace root
+          if (!targetPath.includes(':') && !targetPath.startsWith('/')) {
+            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (workspaceRoot) {
+              targetPath = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), targetPath).fsPath;
+            }
+          }
+
+          const uri = vscode.Uri.file(targetPath);
+          await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+
+          webviewView.webview.postMessage({ 
+            command: 'response', 
+            text: `✅ Successfully created/updated: ${targetPath}` 
+          });
+          return true;
+
+        } catch (err: any) {
+          webviewView.webview.postMessage({ 
+            command: 'response', 
+            text: `❌ Failed to write file: ${err.message}` 
+          });
+          return true; // Still considered handled
+        }
       }
     }
-    return false;
+
+    // === Future EDIT support ===
+    const editMatch = responseText.match(/EDIT FILE:\s*([^\r\n]+)/i);
+    if (editMatch) {
+      webviewView.webview.postMessage({ 
+        command: 'response', 
+        text: `📝 Edit requested for ${editMatch[1].trim()}. (Edit support coming soon)` 
+      });
+      return true;
+    }
+
+    return false; // No file operation detected
   }
 
   private getNonce() {
