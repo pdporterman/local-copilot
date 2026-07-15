@@ -24,7 +24,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   }
 
   private loadChats() {
-    const saved = this.context.globalState.get<Record<string, {title: string, messages: any[] }>>('localLLM.chats');
+    const saved = this.context.globalState.get<Record<string, { title: string, messages: any[] }>>('localLLM.chats');
     if (saved) {
       this.chats = new Map(Object.entries(saved));
     }
@@ -36,9 +36,9 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   }
 
   private sendChatList(webviewView: vscode.WebviewView) {
-    webviewView.webview.postMessage({ 
-      command: 'renderChats', 
-      chats: Object.fromEntries(this.chats) 
+    webviewView.webview.postMessage({
+      command: 'renderChats',
+      chats: Object.fromEntries(this.chats)
     });
   }
 
@@ -94,22 +94,22 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
             const fileName = doc.fileName.split(/[/\\]/).pop() || 'file';
 
             const fileInfo = `**File:** ${doc.fileName}\n\n\`\`\`\n${content}\n\`\`\``;
-            
-            const contextMsg = { 
-              role: 'user', 
-              content: `Here is the content of the currently open file "${fileName}":\n\n${fileInfo}\n\nWhat would you like to know or do with it?` 
+
+            const contextMsg = {
+              role: 'user',
+              content: `Here is the content of the currently open file "${fileName}":\n\n${fileInfo}\n\nWhat would you like to know or do with it?`
             };
-            
+
             this.addMessageToCurrentChat(contextMsg);
-            
-            webviewView.webview.postMessage({ 
-              command: 'response', 
-              text: `✅ Loaded ${fileName} into context.` 
+
+            webviewView.webview.postMessage({
+              command: 'response',
+              text: `✅ Loaded ${fileName} into context.`
             });
           } else {
-            webviewView.webview.postMessage({ 
-              command: 'response', 
-              text: 'No active editor found. Open a file first.' 
+            webviewView.webview.postMessage({
+              command: 'response',
+              text: 'No active editor found. Open a file first.'
             });
           }
           this.sendChatList(webviewView);
@@ -118,10 +118,10 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
         case 'loadChat':
           this.currentChatId = message.chatId;
           const chat = this.chats.get(this.currentChatId);
-          webviewView.webview.postMessage({ 
-            command: 'loadChat', 
+          webviewView.webview.postMessage({
+            command: 'loadChat',
             messages: chat ? chat.messages : [],
-            chatId: this.currentChatId 
+            chatId: this.currentChatId
           });
           this.sendChatList(webviewView);
           break;
@@ -164,13 +164,13 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 User: ${firstUserMsg.content.substring(0, 300)}`;
 
       const summary = await this.callLLM(summaryPrompt);
-      
+
       if (this.chats.has(chatId)) {
         let cleanTitle = summary.trim()
           .replace(/^["']|["']$/g, '')
           .replace(/^Title:?\s*/i, '')
           .substring(0, 60);
-        
+
         this.chats.get(chatId)!.title = cleanTitle || 'New Chat';
         this.saveChats();
 
@@ -334,98 +334,251 @@ User: ${firstUserMsg.content.substring(0, 300)}`;
   private async callLLM(userPrompt: string): Promise<string> {
     try {
       const currentChat = this.chats.get(this.currentChatId);
-      const messages = currentChat ? currentChat.messages : [];
+      const messages = currentChat ? [...currentChat.messages] : [];
+
+      const editor = vscode.window.activeTextEditor;
+
+      let activeFileContext = "";
+
+      if (this.isEditRequest(userPrompt) && editor) {
+        const doc = editor.document;
+
+        activeFileContext =
+          `CURRENT FILE
+
+Filename: ${doc.fileName}
+
+Language: ${doc.languageId}
+
+\`\`\`${doc.languageId}
+${doc.getText()}
+\`\`\`
+`;
+      }
 
       const systemMessage = {
-        role: 'system',
-        content: `You are a concise coding assistant.
+        role: "system",
+        content: `
+You are an expert software engineer.
 
-**Strict file rules:**
-- When creating or updating a file, respond with ONLY this format:
+The CURRENT FILE supplied by the user is the source of truth.
 
-WRITE TO FILE: filename.ext
+Rules:
+
+• NEVER invent code.
+• NEVER recreate the file from memory.
+• SEARCH blocks MUST exist exactly inside the supplied file.
+• If they do not, return
+
+CANNOT_EDIT
+
+and explain why.
+
+When editing return ONLY
+
+EDIT FILE: filename
+
+\`\`\`search-replace
+<<<<<<< SEARCH
+...
+=======
+...
+>>>>>>> REPLACE
 \`\`\`
-full file content here
+
+Multiple search replace blocks are allowed.
+
+For creating a new file return
+
+WRITE TO FILE: filename
+
+\`\`\`
+full file
 \`\`\`
 
-- Do not add extra explanation before or after the WRITE TO FILE block unless the user explicitly asks for it.
-- Be brief. No unnecessary commentary.`
+Do not explain edits unless asked.
+`
       };
 
-      const ollamaMessages = [systemMessage, ...messages.map(m => ({
-        role: m.role,
-        content: m.content
-      }))];
+      const ollamaMessages = [
+        systemMessage,
+        ...messages.map(m => ({
+          role: m.role,
+          content: m.content
+        })),
+        {
+          role: "user",
+          content: activeFileContext + "\n\nUSER REQUEST:\n" + userPrompt
+        }
+      ];
 
-      const response = await fetch('http://localhost:11434/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+      const response = await fetch("http://localhost:11434/api/chat", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
         body: JSON.stringify({
-          model: 'qwen2.5-coder:7b',
-          messages: ollamaMessages,
-          stream: false
+          model: "qwen2.5-coder:7b",
+          stream: false,
+          temperature: 0.0,
+          messages: ollamaMessages
         })
       });
 
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.ok)
+        throw new Error(`HTTP ${response.status}`);
+
       const data: any = await response.json();
-      return data.message?.content || 'No response';
-    } catch (err: any) {
-      console.error(err);
-      return `Error: ${err.message}. Is Ollama running?`;
+
+      return data.message?.content ?? "No response";
+    }
+    catch (err: any) {
+      return `Error: ${err.message}`;
     }
   }
 
   private async handleFileOperation(responseText: string, webviewView: vscode.WebviewView): Promise<boolean> {
-    // === FULL FILE WRITE ===
+    // === FULL WRITE ===
     const writeMatch = responseText.match(/WRITE TO FILE:\s*([^\r\n]+)/i);
     if (writeMatch) {
       const rawPath = writeMatch[1].trim();
       const codeBlockMatch = responseText.match(/```[\w]*\s*\n([\s\S]*?)\n```/);
-
       if (codeBlockMatch) {
-        const content = codeBlockMatch[1];
-        let targetPath = rawPath;
-
-        try {
-          // Resolve relative path to workspace root
-          if (!targetPath.includes(':') && !targetPath.startsWith('/')) {
-            const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-            if (workspaceRoot) {
-              targetPath = vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), targetPath).fsPath;
-            }
-          }
-
-          const uri = vscode.Uri.file(targetPath);
-          await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
-
-          webviewView.webview.postMessage({ 
-            command: 'response', 
-            text: `✅ Successfully created/updated: ${targetPath}` 
-          });
-          return true;
-
-        } catch (err: any) {
-          webviewView.webview.postMessage({ 
-            command: 'response', 
-            text: `❌ Failed to write file: ${err.message}` 
-          });
-          return true; // Still considered handled
-        }
+        return this.writeFullFile(rawPath, codeBlockMatch[1], webviewView);
       }
     }
 
-    // === Future EDIT support ===
+    // === EDIT FILE ===
     const editMatch = responseText.match(/EDIT FILE:\s*([^\r\n]+)/i);
     if (editMatch) {
-      webviewView.webview.postMessage({ 
-        command: 'response', 
-        text: `📝 Edit requested for ${editMatch[1].trim()}. (Edit support coming soon)` 
-      });
-      return true;
+      const rawPath = editMatch[1].trim();
+      const edits = this.extractSearchReplaceBlocks(responseText);
+      if (edits.length > 0) {
+        return this.applyEdits(rawPath, edits, webviewView);
+      }
     }
 
-    return false; // No file operation detected
+    return false;
+  }
+
+  private async writeFullFile(rawPath: string, content: string, webviewView: vscode.WebviewView): Promise<boolean> {
+    try {
+      let targetPath = this.resolvePath(rawPath);
+      const uri = vscode.Uri.file(targetPath);
+      await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+
+      webviewView.webview.postMessage({
+        command: 'response',
+        text: `✅ Wrote full file: ${targetPath}`
+      });
+      return true;
+    } catch (err: any) {
+      webviewView.webview.postMessage({ command: 'response', text: `❌ Write failed: ${err.message}` });
+      return true;
+    }
+  }
+
+  private extractSearchReplaceBlocks(text: string): Array<{ search: string, replace: string }> {
+    const blocks: Array<{ search: string, replace: string }> = [];
+    const regex = /<<<<<<<\s*SEARCH\s*\r?\n([\s\S]*?)\r?\n=======\r?\n([\s\S]*?)\r?\n>>>>>>> *REPLACE/g;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      blocks.push({
+        search: match[1],
+        replace: match[2]
+      });
+    }
+    return blocks;
+  }
+
+  private normalize(text: string): string {
+    return text
+      .replace(/\r\n/g, "\n")
+      .replace(/[ \t]+$/gm, "")
+      .trim();
+  }
+
+  private isEditRequest(prompt: string): boolean {
+
+    const p = prompt.toLowerCase();
+
+    return [
+      "fix",
+      "change",
+      "edit",
+      "rewrite",
+      "rename",
+      "refactor",
+      "modify",
+      "replace",
+      "remove",
+      "add",
+      "make",
+      "update"
+    ].some(k => p.includes(k));
+
+  }
+
+  private async applyEdits(rawPath: string, edits: Array<{ search: string, replace: string }>, webviewView: vscode.WebviewView): Promise<boolean> {
+    try {
+      const targetPath = this.resolvePath(rawPath);
+      const uri = vscode.Uri.file(targetPath);
+      const document = await vscode.workspace.openTextDocument(uri);
+      const editor = await vscode.window.showTextDocument(document);
+
+      let success = true;
+      await editor.edit(editBuilder => {
+        for (const { search, replace } of edits) {
+          const text = document.getText();
+
+          let startIdx = text.indexOf(search);
+
+          if (startIdx === -1) {
+
+            const normalizedDoc = this.normalize(text);
+            const normalizedSearch = this.normalize(search);
+
+            const normalizedIndex = normalizedDoc.indexOf(normalizedSearch);
+
+            if (normalizedIndex !== -1) {
+
+              // Try again after normalizing whitespace
+              startIdx = text.replace(/\r\n/g, "\n").indexOf(search.replace(/\r\n/g, "\n"));
+
+            }
+
+          }
+          if (startIdx !== -1) {
+            const startPos = document.positionAt(startIdx);
+            const endPos = document.positionAt(startIdx + search.length);
+            editBuilder.replace(new vscode.Range(startPos, endPos), replace);
+          } else {
+            success = false;
+            console.warn(`Search block not found: ${search.substring(0, 100)}...`);
+          }
+        }
+      });
+
+      const msg = success
+        ? `✅ Applied edits to ${targetPath}`
+        : `⚠️ Partially applied edits to ${targetPath} (some blocks not found)`;
+
+      webviewView.webview.postMessage({ command: 'response', text: msg });
+      await document.save();
+      return true;
+    } catch (err: any) {
+      webviewView.webview.postMessage({ command: 'response', text: `❌ Edit failed: ${err.message}` });
+      return true;
+    }
+  }
+
+  private resolvePath(rawPath: string): string {
+    if (rawPath.includes(':') || rawPath.startsWith('/')) return rawPath;
+    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceRoot) {
+      return vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), rawPath).fsPath;
+    }
+    return rawPath;
   }
 
   private getNonce() {
