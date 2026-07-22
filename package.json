@@ -1,8 +1,13 @@
 {
-    "name": "local-copilot",
-    "private": true,
-    "workspaces": [
-        "apps/*",
-        "packages/*"
-    ]
+  "name": "local-copilot",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=local-copilot",
+    "watch": "npm run watch --workspace=local-copilot",
+    "lint": "npm run lint --workspace=local-copilot"
+  }
 }

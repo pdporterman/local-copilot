@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 
 export function activate(context: vscode.ExtensionContext) {
-  console.log('Local LLM Copilot activated!');
+  console.log('Local LLM Copilot activated - watch test!');
 
   const provider = new LocalLLMChatProvider(context.extensionUri, context);
   context.subscriptions.push(

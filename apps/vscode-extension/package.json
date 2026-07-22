@@ -1,5 +1,5 @@
 {
-  "name": "local-copilot",
+  "name": "@local-copilot/vscode-extension",
   "displayName": "local-copilot",
   "description": "recreate copilot functionality using ollama models",
   "version": "0.0.1",
@@ -38,6 +38,7 @@
     ]
   },
   "scripts": {
+    "build": "webpack",
     "vscode:prepublish": "npm run package",
     "compile": "webpack",
     "watch": "webpack --watch",
