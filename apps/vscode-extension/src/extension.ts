@@ -1,4 +1,6 @@
 import * as vscode from 'vscode';
+import { AgentRouter } from "./router/AgentRouter";
+import { AgentType } from "../../packages/shared/src/types";
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Local LLM Copilot activated - watch test!');
@@ -16,6 +18,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 class LocalLLMChatProvider implements vscode.WebviewViewProvider {
+  private readonly router = new AgentRouter();
   private currentChatId: string = 'default';
   private chats: Map<string, { title: string; messages: any[] }> = new Map();
 
@@ -54,6 +57,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     });
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
+      const editor = vscode.window.activeTextEditor;
       switch (message.command) {
         case 'sendPrompt':
           let isNewChat = false;
@@ -67,7 +71,27 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           const userMsg = { role: 'user', content: message.prompt, timestamp: Date.now() };
           this.addMessageToCurrentChat(userMsg);
 
-          const responseText = await this.callLLM(message.prompt);
+          const currentChat = this.chats.get(this.currentChatId);
+
+
+          const response = await this.router.route(
+            AgentType.CHAT,
+            {
+              prompt: message.prompt,
+
+              messages: currentChat?.messages,
+
+              activeFile: editor
+                ? {
+                  fileName: editor.document.fileName,
+                  language: editor.document.languageId,
+                  content: editor.document.getText()
+                }
+                : undefined
+            }
+          );
+
+          const responseText = response.message;
 
           // Handle file operations silently
           const fileOperationHandled = await this.handleFileOperation(responseText, webviewView);
@@ -87,7 +111,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'readActiveFile':
-          const editor = vscode.window.activeTextEditor;
+
           if (editor) {
             const doc = editor.document;
             const content = doc.getText();
@@ -159,14 +183,12 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       const firstUserMsg = chat.messages.find(m => m.role === 'user');
       if (!firstUserMsg) return;
 
-      const summaryPrompt = `Create a short 4-6 word title for this chat. Be specific. No quotes.
-
-User: ${firstUserMsg.content.substring(0, 300)}`;
-
-      const summary = await this.callLLM(summaryPrompt);
+      const title = await this.router.generateTitle(
+        firstUserMsg.content
+      );
 
       if (this.chats.has(chatId)) {
-        let cleanTitle = summary.trim()
+        let cleanTitle = title.trim()
           .replace(/^["']|["']$/g, '')
           .replace(/^Title:?\s*/i, '')
           .substring(0, 60);
@@ -329,112 +351,6 @@ User: ${firstUserMsg.content.substring(0, 300)}`;
   </script>
 </body>
 </html>`;
-  }
-
-  private async callLLM(userPrompt: string): Promise<string> {
-    try {
-      const currentChat = this.chats.get(this.currentChatId);
-      const messages = currentChat ? [...currentChat.messages] : [];
-
-      const editor = vscode.window.activeTextEditor;
-
-      let activeFileContext = "";
-
-      if (this.isEditRequest(userPrompt) && editor) {
-        const doc = editor.document;
-
-        activeFileContext =
-          `CURRENT FILE
-
-Filename: ${doc.fileName}
-
-Language: ${doc.languageId}
-
-\`\`\`${doc.languageId}
-${doc.getText()}
-\`\`\`
-`;
-      }
-
-      const systemMessage = {
-        role: "system",
-        content: `
-You are an expert software engineer.
-
-The CURRENT FILE supplied by the user is the source of truth.
-
-Rules:
-
-• NEVER invent code.
-• NEVER recreate the file from memory.
-• SEARCH blocks MUST exist exactly inside the supplied file.
-• If they do not, return
-
-CANNOT_EDIT
-
-and explain why.
-
-When editing return ONLY
-
-EDIT FILE: filename
-
-\`\`\`search-replace
-<<<<<<< SEARCH
-...
-=======
-...
->>>>>>> REPLACE
-\`\`\`
-
-Multiple search replace blocks are allowed.
-
-For creating a new file return
-
-WRITE TO FILE: filename
-
-\`\`\`
-full file
-\`\`\`
-
-Do not explain edits unless asked.
-`
-      };
-
-      const ollamaMessages = [
-        systemMessage,
-        ...messages.map(m => ({
-          role: m.role,
-          content: m.content
-        })),
-        {
-          role: "user",
-          content: activeFileContext + "\n\nUSER REQUEST:\n" + userPrompt
-        }
-      ];
-
-      const response = await fetch("http://localhost:11434/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "qwen2.5-coder:7b",
-          stream: false,
-          temperature: 0.0,
-          messages: ollamaMessages
-        })
-      });
-
-      if (!response.ok)
-        throw new Error(`HTTP ${response.status}`);
-
-      const data: any = await response.json();
-
-      return data.message?.content ?? "No response";
-    }
-    catch (err: any) {
-      return `Error: ${err.message}`;
-    }
   }
 
   private async handleFileOperation(responseText: string, webviewView: vscode.WebviewView): Promise<boolean> {

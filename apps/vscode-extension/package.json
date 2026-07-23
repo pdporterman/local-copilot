@@ -24,6 +24,7 @@
     "views": {
       "local-llm-sidebar": [
         {
+          "icon": "media/icon.svg",
           "type": "webview",
           "id": "localLLM.chatView",
           "name": "Chat"
