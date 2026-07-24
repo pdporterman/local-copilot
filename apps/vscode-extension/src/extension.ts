@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AgentRouter } from "./router/AgentRouter";
 import { AgentType } from "../../packages/shared/src/types";
+import { AssistantController } from "./core/AssistantController";
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Local LLM Copilot activated - watch test!');
@@ -19,6 +20,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   private readonly router = new AgentRouter();
+  private readonly assistant = new AssistantController(this.router);
   private currentChatId: string = 'default';
   private chats: Map<string, { title: string; messages: any[] }> = new Map();
 
@@ -74,7 +76,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           const currentChat = this.chats.get(this.currentChatId);
 
 
-          const response = await this.router.route(
+          const response = await this.assistant.sendMessage(
             AgentType.CHAT,
             {
               prompt: message.prompt,
@@ -175,33 +177,44 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     this.saveChats();
   }
 
-  private async generateBetterTitle(chatId: string, webviewView?: vscode.WebviewView) {
+  private async generateBetterTitle(
+    chatId: string,
+    webviewView?: vscode.WebviewView
+  ): Promise<void> {
+    const chat = this.chats.get(chatId);
+    if (!chat) {
+      return;
+    }
+
+    // Don't generate a title until we have at least one user message
+    const firstUserMessage = chat.messages.find(
+      message => message.role === "user"
+    );
+
+    if (!firstUserMessage) {
+      return;
+    }
+
     try {
-      const chat = this.chats.get(chatId);
-      if (!chat || chat.messages.length < 2) return;
-
-      const firstUserMsg = chat.messages.find(m => m.role === 'user');
-      if (!firstUserMsg) return;
-
-      const title = await this.router.generateTitle(
-        firstUserMsg.content
+      const generatedTitle = await this.assistant.generateTitle(
+        firstUserMessage.content
       );
 
-      if (this.chats.has(chatId)) {
-        let cleanTitle = title.trim()
-          .replace(/^["']|["']$/g, '')
-          .replace(/^Title:?\s*/i, '')
-          .substring(0, 60);
+      const title = generatedTitle
+        .trim()
+        .replace(/^["']|["']$/g, "")
+        .replace(/^title:\s*/i, "")
+        .substring(0, 60);
 
-        this.chats.get(chatId)!.title = cleanTitle || 'New Chat';
-        this.saveChats();
+      chat.title = title || "New Chat";
 
-        if (webviewView) {
-          this.sendChatList(webviewView);
-        }
+      this.saveChats();
+
+      if (webviewView) {
+        this.sendChatList(webviewView);
       }
-    } catch (e) {
-      console.error('Title generation failed:', e);
+    } catch (error) {
+      console.error("Failed to generate chat title:", error);
     }
   }
 
