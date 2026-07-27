@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/vscode-extension"
+    },
+    {
+      "path": "./packages/shared"
+    },
+    {
+      "path": "./packages/agents"
+    }
+  ]
+}

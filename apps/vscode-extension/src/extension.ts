@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { AgentRouter } from "./router/AgentRouter";
-import { AgentType } from "../../packages/shared/src/types";
+import { AgentType } from "../../../packages/shared/src/types";
 import { AssistantController } from "./core/AssistantController";
 
 export function activate(context: vscode.ExtensionContext) {
