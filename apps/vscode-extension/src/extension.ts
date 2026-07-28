@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { AgentRouter } from "./router/AgentRouter";
 import { AgentType } from "../../../packages/shared/src/types";
 import { AssistantController } from "./core/AssistantController";
+import { ContextService } from "./services/ContextService";
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Local LLM Copilot activated - watch test!');
@@ -21,6 +22,9 @@ export function activate(context: vscode.ExtensionContext) {
 class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   private readonly router = new AgentRouter();
   private readonly assistant = new AssistantController(this.router);
+
+  private readonly contextService = new ContextService();
+
   private currentChatId: string = 'default';
   private chats: Map<string, { title: string; messages: any[] }> = new Map();
 
@@ -59,7 +63,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     });
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
-      const editor = vscode.window.activeTextEditor;
+      const editorContext = this.contextService.getCurrentContext();
       switch (message.command) {
         case 'sendPrompt':
           let isNewChat = false;
@@ -83,13 +87,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 
               messages: currentChat?.messages,
 
-              activeFile: editor
-                ? {
-                  fileName: editor.document.fileName,
-                  language: editor.document.languageId,
-                  content: editor.document.getText()
-                }
-                : undefined
+              activeFile: editorContext
             }
           );
 
@@ -113,7 +111,9 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'readActiveFile':
-
+          
+          const editor = vscode.window.activeTextEditor;
+          
           if (editor) {
             const doc = editor.document;
             const content = doc.getText();
