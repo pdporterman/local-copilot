@@ -3,6 +3,9 @@ import { AgentRouter } from "./router/AgentRouter";
 import { AgentType } from "../../../packages/shared/src/types";
 import { AssistantController } from "./core/AssistantController";
 import { ContextService } from "./services/ContextService";
+import { ContextMessageBuilder } from "./services/ContextMessageBuilder";
+import { Chat } from "./models/Chat";
+import { ChatMessage } from "./models/ChatMessage";
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Local LLM Copilot activated - watch test!');
@@ -26,18 +29,22 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   private readonly contextService = new ContextService();
 
   private currentChatId: string = 'default';
-  private chats: Map<string, { title: string; messages: any[] }> = new Map();
+  private chats = new Map<string, Chat>();
 
   constructor(private readonly _extensionUri: vscode.Uri, private context: vscode.ExtensionContext) {
     this.loadChats();
   }
 
   private loadChats() {
-    const saved = this.context.globalState.get<Record<string, { title: string, messages: any[] }>>('localLLM.chats');
+    const saved = this.context.globalState.get<Record<string, Chat>>(
+      "localLLM.chats"
+    );
+
     if (saved) {
       this.chats = new Map(Object.entries(saved));
     }
-    this.currentChatId = 'default';
+
+    this.currentChatId = "default";
   }
 
   private saveChats() {
@@ -70,11 +77,22 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 
           if (!this.chats.has(this.currentChatId) || this.chats.get(this.currentChatId)!.messages.length === 0) {
             isNewChat = true;
+
             this.currentChatId = `chat-${Date.now()}`;
-            this.chats.set(this.currentChatId, { title: 'New Chat', messages: [] });
+
+            this.chats.set(this.currentChatId, {
+              id: this.currentChatId,
+              title: "New Chat",
+              messages: []
+            });
           }
 
-          const userMsg = { role: 'user', content: message.prompt, timestamp: Date.now() };
+          const userMsg: ChatMessage = {
+            role: "user",
+            content: message.prompt,
+            timestamp: Date.now()
+          };
+
           this.addMessageToCurrentChat(userMsg);
 
           const currentChat = this.chats.get(this.currentChatId);
@@ -98,7 +116,12 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 
           // Only show AI response if no file operation was performed
           if (!fileOperationHandled) {
-            const assistantMsg = { role: 'assistant', content: responseText, timestamp: Date.now() };
+            const assistantMsg: ChatMessage = {
+              role: "assistant",
+              content: responseText,
+              timestamp: Date.now()
+            };
+
             this.addMessageToCurrentChat(assistantMsg);
             webviewView.webview.postMessage({ command: 'response', text: responseText });
           }
@@ -111,33 +134,31 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           break;
 
         case 'readActiveFile':
-          
-          const editor = vscode.window.activeTextEditor;
-          
-          if (editor) {
-            const doc = editor.document;
-            const content = doc.getText();
-            const fileName = doc.fileName.split(/[/\\]/).pop() || 'file';
 
-            const fileInfo = `**File:** ${doc.fileName}\n\n\`\`\`\n${content}\n\`\`\``;
+          const context = this.contextService.getCurrentContext();
 
-            const contextMsg = {
-              role: 'user',
-              content: `Here is the content of the currently open file "${fileName}":\n\n${fileInfo}\n\nWhat would you like to know or do with it?`
-            };
+          if (context) {
+            const fileName = context.fileName.split(/[/\\]/).pop() || "file";
+
+            const fileInfo =
+              `**File:** ${context.fileName}\n\n` +
+              `\`\`\`${context.language}\n${context.content}\n\`\`\``;
+
+            const contextMsg = ContextMessageBuilder.fromEditorContext(context);
 
             this.addMessageToCurrentChat(contextMsg);
 
             webviewView.webview.postMessage({
-              command: 'response',
+              command: "response",
               text: `✅ Loaded ${fileName} into context.`
             });
           } else {
             webviewView.webview.postMessage({
-              command: 'response',
-              text: 'No active editor found. Open a file first.'
+              command: "response",
+              text: "No active editor found. Open a file first."
             });
           }
+
           this.sendChatList(webviewView);
           break;
 
@@ -169,11 +190,17 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private addMessageToCurrentChat(msg: any) {
+  private addMessageToCurrentChat(msg: ChatMessage) {
     if (!this.chats.has(this.currentChatId)) {
-      this.chats.set(this.currentChatId, { title: 'New Chat', messages: [] });
+      this.chats.set(this.currentChatId, {
+        id: this.currentChatId,
+        title: "New Chat",
+        messages: []
+      });
     }
+
     this.chats.get(this.currentChatId)!.messages.push(msg);
+
     this.saveChats();
   }
 
