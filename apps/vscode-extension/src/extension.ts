@@ -4,6 +4,7 @@ import { AgentType } from "../../../packages/shared/src/types";
 import { AssistantController } from "./core/AssistantController";
 import { ContextService } from "./services/ContextService";
 import { ContextMessageBuilder } from "./services/ContextMessageBuilder";
+import { ChatService } from "./services/ChatService"
 import { Chat } from "./models/Chat";
 import { ChatMessage } from "./models/ChatMessage";
 
@@ -28,33 +29,17 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 
   private readonly contextService = new ContextService();
 
-  private currentChatId: string = 'default';
-  private chats = new Map<string, Chat>();
+  private readonly chatService: ChatService;
+
 
   constructor(private readonly _extensionUri: vscode.Uri, private context: vscode.ExtensionContext) {
-    this.loadChats();
-  }
-
-  private loadChats() {
-    const saved = this.context.globalState.get<Record<string, Chat>>(
-      "localLLM.chats"
-    );
-
-    if (saved) {
-      this.chats = new Map(Object.entries(saved));
-    }
-
-    this.currentChatId = "default";
-  }
-
-  private saveChats() {
-    this.context.globalState.update('localLLM.chats', Object.fromEntries(this.chats));
+    this.chatService = new ChatService(context);
   }
 
   private sendChatList(webviewView: vscode.WebviewView) {
     webviewView.webview.postMessage({
-      command: 'renderChats',
-      chats: Object.fromEntries(this.chats)
+      command: "renderChats",
+      chats: Object.fromEntries(this.chatService.getChats())
     });
   }
 
@@ -72,19 +57,21 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (message) => {
       const editorContext = this.contextService.getCurrentContext();
       switch (message.command) {
-        case 'sendPrompt':
+        case "sendPrompt":
+
           let isNewChat = false;
 
-          if (!this.chats.has(this.currentChatId) || this.chats.get(this.currentChatId)!.messages.length === 0) {
+          let currentChat = this.chatService.getCurrentChat();
+
+          if (!currentChat || currentChat.messages.length === 0) {
+
             isNewChat = true;
 
-            this.currentChatId = `chat-${Date.now()}`;
+            const chatId = `chat-${Date.now()}`;
 
-            this.chats.set(this.currentChatId, {
-              id: this.currentChatId,
-              title: "New Chat",
-              messages: []
-            });
+            this.chatService.setCurrentChatId(chatId);
+
+            currentChat = this.chatService.createChat(chatId);
           }
 
           const userMsg: ChatMessage = {
@@ -95,45 +82,20 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 
           this.addMessageToCurrentChat(userMsg);
 
-          const currentChat = this.chats.get(this.currentChatId);
+          // Refresh reference because addMessageToCurrentChat modifies storage
+          currentChat = this.chatService.getCurrentChat();
 
 
           const response = await this.assistant.sendMessage(
             AgentType.CHAT,
             {
               prompt: message.prompt,
-
               messages: currentChat?.messages,
-
               activeFile: editorContext
             }
           );
 
-          const responseText = response.message;
-
-          // Handle file operations silently
-          const fileOperationHandled = await this.handleFileOperation(responseText, webviewView);
-
-          // Only show AI response if no file operation was performed
-          if (!fileOperationHandled) {
-            const assistantMsg: ChatMessage = {
-              role: "assistant",
-              content: responseText,
-              timestamp: Date.now()
-            };
-
-            this.addMessageToCurrentChat(assistantMsg);
-            webviewView.webview.postMessage({ command: 'response', text: responseText });
-          }
-
-          if (isNewChat) {
-            this.generateBetterTitle(this.currentChatId, webviewView);
-          }
-
-          this.sendChatList(webviewView);
-          break;
-
-        case 'readActiveFile':
+        case 'readActiveFile': {
 
           const context = this.contextService.getCurrentContext();
 
@@ -161,61 +123,79 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 
           this.sendChatList(webviewView);
           break;
+        }
 
-        case 'loadChat':
-          this.currentChatId = message.chatId;
-          const chat = this.chats.get(this.currentChatId);
+        case "loadChat": {
+
+          this.chatService.setCurrentChatId(message.chatId);
+
+          const chat = this.chatService.getCurrentChat();
+
           webviewView.webview.postMessage({
-            command: 'loadChat',
-            messages: chat ? chat.messages : [],
-            chatId: this.currentChatId
+            command: "loadChat",
+            messages: chat?.messages ?? [],
+            chatId: this.chatService.getCurrentChatId()
           });
+
           this.sendChatList(webviewView);
           break;
+        }
 
-        case 'newChat':
-          this.currentChatId = `chat-${Date.now()}`;
-          webviewView.webview.postMessage({ command: 'newChat', chatId: this.currentChatId });
+        case "newChat": {
+
+          const chatId = `chat-${Date.now()}`;
+
+          this.chatService.setCurrentChatId(chatId);
+
+          webviewView.webview.postMessage({
+            command: "newChat",
+            chatId
+          });
+
           break;
+        }
 
-        case 'deleteChat':
-          if (message.chatId && this.chats.has(message.chatId)) {
-            this.chats.delete(message.chatId);
-            if (this.currentChatId === message.chatId) this.currentChatId = 'default';
-            this.saveChats();
+        case "deleteChat": {
+
+          if (message.chatId) {
+
+            this.chatService.deleteChat(message.chatId);
+
             this.sendChatList(webviewView);
           }
+
           break;
+        }
       }
     });
   }
 
-  private addMessageToCurrentChat(msg: ChatMessage) {
-    if (!this.chats.has(this.currentChatId)) {
-      this.chats.set(this.currentChatId, {
-        id: this.currentChatId,
-        title: "New Chat",
-        messages: []
-      });
+  private addMessageToCurrentChat(msg: ChatMessage): void {
+
+    let chat = this.chatService.getCurrentChat();
+
+    if (!chat) {
+      chat = this.chatService.createChat(
+        this.chatService.getCurrentChatId()
+      );
     }
 
-    this.chats.get(this.currentChatId)!.messages.push(msg);
-
-    this.saveChats();
+    this.chatService.addMessage(chat.id, msg);
   }
 
   private async generateBetterTitle(
     chatId: string,
     webviewView?: vscode.WebviewView
   ): Promise<void> {
-    const chat = this.chats.get(chatId);
+
+    const chat = this.chatService.getChat(chatId);
+
     if (!chat) {
       return;
     }
 
-    // Don't generate a title until we have at least one user message
     const firstUserMessage = chat.messages.find(
-      message => message.role === "user"
+      (message: ChatMessage) => message.role === "user"
     );
 
     if (!firstUserMessage) {
@@ -223,23 +203,25 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     }
 
     try {
-      const generatedTitle = await this.assistant.generateTitle(
-        firstUserMessage.content
-      );
 
-      const title = generatedTitle
-        .trim()
-        .replace(/^["']|["']$/g, "")
-        .replace(/^title:\s*/i, "")
-        .substring(0, 60);
+      const generatedTitle =
+        await this.assistant.generateTitle(firstUserMessage.content);
 
-      chat.title = title || "New Chat";
+      const title =
+        generatedTitle
+          .trim()
+          .replace(/^["']|["']$/g, "")
+          .replace(/^title:\s*/i, "")
+          .substring(0, 60) || "New Chat";
 
-      this.saveChats();
+
+      this.chatService.setTitle(chatId, title);
+
 
       if (webviewView) {
         this.sendChatList(webviewView);
       }
+
     } catch (error) {
       console.error("Failed to generate chat title:", error);
     }
