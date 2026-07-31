@@ -74,7 +74,7 @@ full file
             messages.push(...request.messages);
         }
 
-        if (request.activeFile && this.isEditRequest(request.prompt)) {
+        if (request.activeFile) {
 
             messages.push({
                 role: "user",

@@ -1,6 +1,5 @@
 import { AgentRouter } from "../router/AgentRouter";
-import { AgentRequest, AgentResponse } from "../agents/Agent";
-import { AgentType } from "../agents/AgentType";
+import { AgentRequest, AgentResponse, AgentType } from "../../../../packages/shared/src/types";
 
 export class AssistantController {
     constructor(
