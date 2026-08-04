@@ -5,7 +5,6 @@ import { AssistantController } from "./core/AssistantController";
 import { ContextService } from "./services/ContextService";
 import { ContextMessageBuilder } from "./services/ContextMessageBuilder";
 import { ChatService } from "./services/ChatService"
-import { Chat } from "./models/Chat";
 import { ChatMessage } from "./models/ChatMessage";
 
 export function activate(context: vscode.ExtensionContext) {
@@ -43,6 +42,154 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async handleSendPrompt(message: any, webviewView: vscode.WebviewView): Promise<void> {
+
+    let isNewChat = false;
+
+    let currentChat = this.chatService.getCurrentChat();
+
+    // Create a chat if one does not exist yet
+    if (!currentChat || currentChat.messages.length === 0) {
+      isNewChat = true;
+
+      const chatId = `chat-${Date.now()}`;
+
+      this.chatService.setCurrentChatId(chatId);
+
+      currentChat = this.chatService.createChat(chatId);
+    }
+
+    // Add the user's message to chat history
+    const userMsg: ChatMessage = {
+      role: "user",
+      content: message.prompt,
+      timestamp: Date.now()
+    };
+
+    this.addMessageToCurrentChat(userMsg);
+
+    // Refresh chat after modifying storage
+    currentChat = this.chatService.getCurrentChat();
+
+    // Capture current editor context
+    const editorContext = this.contextService.getCurrentContext();
+
+    try {
+      const response = await this.assistant.sendMessage(
+        AgentType.CHAT,
+        {
+          prompt: message.prompt,
+          messages: currentChat?.messages,
+          activeFile: editorContext
+        }
+      );
+
+      // Check whether the response contains a file operation
+      const handled = await this.handleFileOperation(response.message, webviewView);
+      // Normal chat response
+      if (!handled) {
+        const assistantMsg: ChatMessage = {
+          role: "assistant",
+          content: response.message,
+          timestamp: Date.now()
+        };
+
+        this.addMessageToCurrentChat(assistantMsg);
+
+        webviewView.webview.postMessage({
+          command: "response",
+          text: response.message
+        });
+      }
+
+      // Generate a title for a newly-created chat
+      if (isNewChat) {
+        await this.generateBetterTitle(
+          this.chatService.getCurrentChatId(),
+          webviewView
+        );
+      }
+
+      this.sendChatList(webviewView);
+
+    } catch (error: any) {
+
+      console.error("Failed to process prompt:", error);
+
+      webviewView.webview.postMessage({
+        command: "response",
+        text: `❌ Error: ${error.message ?? "Failed to process request."}`
+      });
+    }
+  }
+
+  private async handleReadActiveFile(webviewView: vscode.WebviewView): Promise<void> {
+
+    const context = this.contextService.getCurrentContext();
+
+    if (!context) {
+      webviewView.webview.postMessage({
+        command: "response",
+        text: "No active editor found. Open a file first."
+      });
+
+      return;
+    }
+
+    const fileName =
+      context.fileName.split(/[/\\]/).pop() || "file";
+
+    const contextMsg =
+      ContextMessageBuilder.fromEditorContext(context);
+
+    this.addMessageToCurrentChat(contextMsg);
+
+    webviewView.webview.postMessage({
+      command: "response",
+      text: `✅ Loaded ${fileName} into context.`
+    });
+
+    this.sendChatList(webviewView);
+  }
+
+  private handleLoadChat(message: any, webviewView: vscode.WebviewView): void {
+
+    this.chatService.setCurrentChatId(message.chatId);
+
+    const chat = this.chatService.getCurrentChat();
+
+    webviewView.webview.postMessage({
+      command: "loadChat",
+      messages: chat?.messages ?? [],
+      chatId: this.chatService.getCurrentChatId()
+    });
+
+    this.sendChatList(webviewView);
+  }
+
+  private handleNewChat(webviewView: vscode.WebviewView): void {
+
+    const chatId = `chat-${Date.now()}`;
+
+    this.chatService.setCurrentChatId(chatId);
+
+    webviewView.webview.postMessage({
+      command: "newChat",
+      chatId
+    });
+  }
+
+  private handleDeleteChat(message: any, webviewView: vscode.WebviewView): void {
+
+    if (!message.chatId) {
+      return;
+    }
+
+    this.chatService.deleteChat(message.chatId);
+
+    this.sendChatList(webviewView);
+  }
+
   public resolveWebviewView(webviewView: vscode.WebviewView) {
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
@@ -55,115 +202,29 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
     });
 
     webviewView.webview.onDidReceiveMessage(async (message) => {
-      const editorContext = this.contextService.getCurrentContext();
       switch (message.command) {
-        case "sendPrompt":
-
-          let isNewChat = false;
-
-          let currentChat = this.chatService.getCurrentChat();
-
-          if (!currentChat || currentChat.messages.length === 0) {
-
-            isNewChat = true;
-
-            const chatId = `chat-${Date.now()}`;
-
-            this.chatService.setCurrentChatId(chatId);
-
-            currentChat = this.chatService.createChat(chatId);
-          }
-
-          const userMsg: ChatMessage = {
-            role: "user",
-            content: message.prompt,
-            timestamp: Date.now()
-          };
-
-          this.addMessageToCurrentChat(userMsg);
-
-          // Refresh reference because addMessageToCurrentChat modifies storage
-          currentChat = this.chatService.getCurrentChat();
-
-
-          const response = await this.assistant.sendMessage(
-            AgentType.CHAT,
-            {
-              prompt: message.prompt,
-              messages: currentChat?.messages,
-              activeFile: editorContext
-            }
-          );
+        case "sendPrompt": {
+          await this.handleSendPrompt(message, webviewView);
+          break;
+        }
 
         case 'readActiveFile': {
-
-          const context = this.contextService.getCurrentContext();
-
-          if (context) {
-            const fileName = context.fileName.split(/[/\\]/).pop() || "file";
-
-            const fileInfo =
-              `**File:** ${context.fileName}\n\n` +
-              `\`\`\`${context.language}\n${context.content}\n\`\`\``;
-
-            const contextMsg = ContextMessageBuilder.fromEditorContext(context);
-
-            this.addMessageToCurrentChat(contextMsg);
-
-            webviewView.webview.postMessage({
-              command: "response",
-              text: `✅ Loaded ${fileName} into context.`
-            });
-          } else {
-            webviewView.webview.postMessage({
-              command: "response",
-              text: "No active editor found. Open a file first."
-            });
-          }
-
-          this.sendChatList(webviewView);
+          await this.handleReadActiveFile(webviewView);
           break;
         }
 
         case "loadChat": {
-
-          this.chatService.setCurrentChatId(message.chatId);
-
-          const chat = this.chatService.getCurrentChat();
-
-          webviewView.webview.postMessage({
-            command: "loadChat",
-            messages: chat?.messages ?? [],
-            chatId: this.chatService.getCurrentChatId()
-          });
-
-          this.sendChatList(webviewView);
+          this.handleLoadChat(message, webviewView);
           break;
         }
 
         case "newChat": {
-
-          const chatId = `chat-${Date.now()}`;
-
-          this.chatService.setCurrentChatId(chatId);
-
-          webviewView.webview.postMessage({
-            command: "newChat",
-            chatId
-          });
-
+          this.handleNewChat(webviewView);
           break;
         }
 
         case "deleteChat": {
-
-          if (message.chatId) {
-
-            this.chatService.deleteChat(message.chatId);
-
-            this.sendChatList(webviewView);
-          }
-
+          this.handleDeleteChat(message, webviewView);
           break;
         }
       }
@@ -375,25 +436,62 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 </html>`;
   }
 
-  private async handleFileOperation(responseText: string, webviewView: vscode.WebviewView): Promise<boolean> {
-    // === FULL WRITE ===
-    const writeMatch = responseText.match(/WRITE TO FILE:\s*([^\r\n]+)/i);
+  private async handleFileOperation(
+    responseText: string,
+    webviewView: vscode.WebviewView
+  ): Promise<boolean> {
+
+    const writeMatch = responseText.match(
+      /WRITE TO FILE:\s*([^\r\n]+)/i
+    );
+
     if (writeMatch) {
       const rawPath = writeMatch[1].trim();
-      const codeBlockMatch = responseText.match(/```[\w]*\s*\n([\s\S]*?)\n```/);
-      if (codeBlockMatch) {
-        return this.writeFullFile(rawPath, codeBlockMatch[1], webviewView);
+
+      const codeBlockMatch = responseText.match(
+        /```[\w]*\s*\n([\s\S]*?)\n```/
+      );
+
+      if (!codeBlockMatch) {
+        webviewView.webview.postMessage({
+          command: "response",
+          text: "❌ File creation response was missing a code block."
+        });
+
+        return true;
       }
+
+      return this.writeFullFile(
+        rawPath,
+        codeBlockMatch[1],
+        webviewView
+      );
     }
 
-    // === EDIT FILE ===
-    const editMatch = responseText.match(/EDIT FILE:\s*([^\r\n]+)/i);
+    const editMatch = responseText.match(
+      /EDIT FILE:\s*([^\r\n]+)/i
+    );
+
     if (editMatch) {
       const rawPath = editMatch[1].trim();
-      const edits = this.extractSearchReplaceBlocks(responseText);
-      if (edits.length > 0) {
-        return this.applyEdits(rawPath, edits, webviewView);
+
+      const edits =
+        this.extractSearchReplaceBlocks(responseText);
+
+      if (edits.length === 0) {
+        webviewView.webview.postMessage({
+          command: "response",
+          text: "❌ Edit response did not contain any search/replace blocks."
+        });
+
+        return true;
       }
+
+      return this.applyEdits(
+        rawPath,
+        edits,
+        webviewView
+      );
     }
 
     return false;
@@ -436,27 +534,6 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       .trim();
   }
 
-  private isEditRequest(prompt: string): boolean {
-
-    const p = prompt.toLowerCase();
-
-    return [
-      "fix",
-      "change",
-      "edit",
-      "rewrite",
-      "rename",
-      "refactor",
-      "modify",
-      "replace",
-      "remove",
-      "add",
-      "make",
-      "update"
-    ].some(k => p.includes(k));
-
-  }
-
   private async applyEdits(rawPath: string, edits: Array<{ search: string, replace: string }>, webviewView: vscode.WebviewView): Promise<boolean> {
     try {
       const targetPath = this.resolvePath(rawPath);
@@ -472,19 +549,10 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
           let startIdx = text.indexOf(search);
 
           if (startIdx === -1) {
+            const normalizedDoc = text.replace(/\r\n/g, "\n");
+            const normalizedSearch = search.replace(/\r\n/g, "\n");
 
-            const normalizedDoc = this.normalize(text);
-            const normalizedSearch = this.normalize(search);
-
-            const normalizedIndex = normalizedDoc.indexOf(normalizedSearch);
-
-            if (normalizedIndex !== -1) {
-
-              // Try again after normalizing whitespace
-              startIdx = text.replace(/\r\n/g, "\n").indexOf(search.replace(/\r\n/g, "\n"));
-
-            }
-
+            startIdx = normalizedDoc.indexOf(normalizedSearch);
           }
           if (startIdx !== -1) {
             const startPos = document.positionAt(startIdx);

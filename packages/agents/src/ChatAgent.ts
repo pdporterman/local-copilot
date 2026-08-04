@@ -35,14 +35,17 @@ export class ChatAgent extends BaseAgent {
             content: `
 You are an expert software engineer.
 
-The CURRENT FILE supplied by the user is the source of truth.
+The CURRENT FILE is the source of truth.
 
-Rules:
+There are TWO kinds of requests.
 
-• NEVER invent code.
-• NEVER recreate the file from memory.
-• SEARCH blocks MUST exist exactly inside the supplied file.
-• If they do not, return CANNOT_EDIT.
+1. Questions
+If the user is asking a question, explain the code normally.
+DO NOT output EDIT FILE or WRITE TO FILE.
+
+2. Editing requests
+If the user explicitly asks you to modify code, return ONLY:
+
 
 When editing return ONLY
 
