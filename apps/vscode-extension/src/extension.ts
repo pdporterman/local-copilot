@@ -6,6 +6,9 @@ import { ContextService } from "./services/ContextService";
 import { ContextMessageBuilder } from "./services/ContextMessageBuilder";
 import { ChatService } from "./services/ChatService"
 import { ChatMessage } from "./models/ChatMessage";
+import { FileOperationService } from "./services/FileOperationService";
+import * as fs from "fs";
+import * as path from "path";
 
 export function activate(context: vscode.ExtensionContext) {
   console.log('Local LLM Copilot activated - watch test!');
@@ -27,6 +30,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
   private readonly assistant = new AssistantController(this.router);
 
   private readonly contextService = new ContextService();
+  private readonly fileOperationService = new FileOperationService();
 
   private readonly chatService: ChatService;
 
@@ -85,7 +89,7 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
       );
 
       // Check whether the response contains a file operation
-      const handled = await this.handleFileOperation(response.message, webviewView);
+      const handled = await this.fileOperationService.handle(response.message, webviewView);
       // Normal chat response
       if (!handled) {
         const assistantMsg: ChatMessage = {
@@ -290,301 +294,21 @@ class LocalLLMChatProvider implements vscode.WebviewViewProvider {
 
   private _getHtmlForWebview(webview: vscode.Webview): string {
     const nonce = this.getNonce();
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src ${webview.cspSource} 'unsafe-inline';">
-  <style>
-    body { margin:0; padding:0; font-family:var(--vscode-font-family); background:var(--vscode-editor-background); color:var(--vscode-editor-foreground); height:100vh; overflow:hidden; }
-    #menu, #chat-screen { height:100%; display:flex; flex-direction:column; }
-    #chat-screen { display:none; }
-    .header { padding:12px; border-bottom:1px solid #444; display:flex; align-items:center; gap:10px; }
-    .back-btn { font-size:20px; cursor:pointer; padding:0 8px; }
-    #chat-container { flex:1; overflow-y:auto; padding:15px; display:flex; flex-direction:column; gap:12px; }
-    .message { max-width:80%; padding:12px 16px; border-radius:18px; line-height:1.5; }
-    .user { align-self:flex-end; background:#007acc; color:white; }
-    .assistant { align-self:flex-start; background:#2d2d2d; }
-    .chat-item { padding:12px; cursor:pointer; border-radius:6px; margin-bottom:6px; }
-    .chat-item:hover { background:#2d2d2d; }
-    #input-area { padding:12px; border-top:1px solid #444; display:flex; gap:8px; }
-    #prompt { flex:1; padding:10px 14px; border-radius:20px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:none; }
-    button { padding:10px 20px; border-radius:20px; background:#007acc; color:white; border:none; cursor:pointer; }
-    #read-file { padding:8px 12px; background:#2d2d2d; border:none; border-radius:20px; cursor:pointer; font-size:16px; }
-  </style>
-</head>
-<body>
-  <div id="menu">
-    <div class="header"><h3>Chats</h3></div>
-    <button onclick="newChat()" style="margin:12px;width:calc(100% - 24px);">+ New Chat</button>
-    <div id="chat-list" style="padding:0 12px;"></div>
-  </div>
 
-  <div id="chat-screen">
-    <div class="header">
-      <span class="back-btn" onclick="showMenu()">←</span>
-      <h3 id="chat-title">Chat</h3>
-      <button onclick="deleteCurrentChat()" style="margin-left:auto; background:#ff5555; padding:5px 10px; font-size:12px;">🗑️ Delete</button>
-    </div>
-    <div id="chat-container"></div>
-    <div id="input-area">
-      <textarea id="prompt" rows="1" placeholder="Type a message..."></textarea>
-      <button id="send">Send</button>
-      <button id="read-file" title="Read active file">📄</button>
-    </div>
-  </div>
-
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    let currentChatId = 'default';
-
-    function showMenu() {
-      document.getElementById('menu').style.display = 'flex';
-      document.getElementById('chat-screen').style.display = 'none';
-    }
-
-    function showChat() {
-      document.getElementById('menu').style.display = 'none';
-      document.getElementById('chat-screen').style.display = 'flex';
-    }
-
-    function renderChatList(chats) {
-      const container = document.getElementById('chat-list');
-      container.innerHTML = '';
-      const chatIds = Object.keys(chats);
-      chatIds.sort((a, b) => {
-        const timeA = parseInt(a.replace('chat-', '')) || 0;
-        const timeB = parseInt(b.replace('chat-', '')) || 0;
-        return timeB - timeA;
-      });
-      chatIds.forEach(id => {
-        const chat = chats[id];
-        const item = document.createElement('div');
-        item.className = 'chat-item';
-        item.textContent = chat.title || 'Untitled Chat';
-        item.addEventListener('click', () => {
-          currentChatId = id;
-          vscode.postMessage({command: 'loadChat', chatId: id});
-        });
-        container.appendChild(item);
-      });
-    }
-
-    function addMessage(role, content) {
-      const container = document.getElementById('chat-container');
-      const div = document.createElement('div');
-      div.className = \`message \${role}\`;
-      div.textContent = content;
-      container.appendChild(div);
-      container.scrollTop = container.scrollHeight;
-    }
-
-    function newChat() {
-      vscode.postMessage({command: 'newChat'});
-    }
-
-    function deleteCurrentChat() {
-      vscode.postMessage({command: 'deleteChat', chatId: currentChatId});
-      showMenu();
-    }
-
-    window.addEventListener('message', (event) => {
-      const msg = event.data;
-      if (msg.command === 'response') {
-        addMessage('assistant', msg.text);
-      } else if (msg.command === 'loadChat') {
-        currentChatId = msg.chatId;
-        document.getElementById('chat-container').innerHTML = '';
-        (msg.messages || []).forEach(m => addMessage(m.role, m.content));
-        showChat();
-      } else if (msg.command === 'newChat') {
-        currentChatId = msg.chatId;
-        document.getElementById('chat-container').innerHTML = '';
-        showChat();
-      } else if (msg.command === 'renderChats') {
-        renderChatList(msg.chats);
-      }
-    });
-
-    function sendPrompt() {
-      const input = document.getElementById('prompt');
-      if (input.value.trim()) {
-        addMessage('user', input.value);
-        vscode.postMessage({command: 'sendPrompt', prompt: input.value});
-        input.value = '';
-      }
-    }
-
-    document.getElementById('send').addEventListener('click', sendPrompt);
-    document.getElementById('prompt').addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        sendPrompt();
-      }
-    });
-
-    const readFileBtn = document.getElementById('read-file');
-    if (readFileBtn) {
-      readFileBtn.addEventListener('click', () => {
-        vscode.postMessage({command: 'readActiveFile'});
-      });
-    }
-
-    vscode.postMessage({command: 'refreshMenu'});
-  </script>
-</body>
-</html>`;
-  }
-
-  private async handleFileOperation(
-    responseText: string,
-    webviewView: vscode.WebviewView
-  ): Promise<boolean> {
-
-    const writeMatch = responseText.match(
-      /WRITE TO FILE:\s*([^\r\n]+)/i
+    const htmlPath = path.join(
+      this._extensionUri.fsPath,
+      "src",
+      "webview",
+      "chat.html"
     );
 
-    if (writeMatch) {
-      const rawPath = writeMatch[1].trim();
+    let html = fs.readFileSync(htmlPath, "utf8");
 
-      const codeBlockMatch = responseText.match(
-        /```[\w]*\s*\n([\s\S]*?)\n```/
-      );
+    html = html
+      .replace(/\{\{CSP_SOURCE\}\}/g, webview.cspSource)
+      .replace(/\{\{NONCE\}\}/g, nonce);
 
-      if (!codeBlockMatch) {
-        webviewView.webview.postMessage({
-          command: "response",
-          text: "❌ File creation response was missing a code block."
-        });
-
-        return true;
-      }
-
-      return this.writeFullFile(
-        rawPath,
-        codeBlockMatch[1],
-        webviewView
-      );
-    }
-
-    const editMatch = responseText.match(
-      /EDIT FILE:\s*([^\r\n]+)/i
-    );
-
-    if (editMatch) {
-      const rawPath = editMatch[1].trim();
-
-      const edits =
-        this.extractSearchReplaceBlocks(responseText);
-
-      if (edits.length === 0) {
-        webviewView.webview.postMessage({
-          command: "response",
-          text: "❌ Edit response did not contain any search/replace blocks."
-        });
-
-        return true;
-      }
-
-      return this.applyEdits(
-        rawPath,
-        edits,
-        webviewView
-      );
-    }
-
-    return false;
-  }
-
-  private async writeFullFile(rawPath: string, content: string, webviewView: vscode.WebviewView): Promise<boolean> {
-    try {
-      let targetPath = this.resolvePath(rawPath);
-      const uri = vscode.Uri.file(targetPath);
-      await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
-
-      webviewView.webview.postMessage({
-        command: 'response',
-        text: `✅ Wrote full file: ${targetPath}`
-      });
-      return true;
-    } catch (err: any) {
-      webviewView.webview.postMessage({ command: 'response', text: `❌ Write failed: ${err.message}` });
-      return true;
-    }
-  }
-
-  private extractSearchReplaceBlocks(text: string): Array<{ search: string, replace: string }> {
-    const blocks: Array<{ search: string, replace: string }> = [];
-    const regex = /<<<<<<<\s*SEARCH\s*\r?\n([\s\S]*?)\r?\n=======\r?\n([\s\S]*?)\r?\n>>>>>>> *REPLACE/g;
-    let match;
-    while ((match = regex.exec(text)) !== null) {
-      blocks.push({
-        search: match[1],
-        replace: match[2]
-      });
-    }
-    return blocks;
-  }
-
-  private normalize(text: string): string {
-    return text
-      .replace(/\r\n/g, "\n")
-      .replace(/[ \t]+$/gm, "")
-      .trim();
-  }
-
-  private async applyEdits(rawPath: string, edits: Array<{ search: string, replace: string }>, webviewView: vscode.WebviewView): Promise<boolean> {
-    try {
-      const targetPath = this.resolvePath(rawPath);
-      const uri = vscode.Uri.file(targetPath);
-      const document = await vscode.workspace.openTextDocument(uri);
-      const editor = await vscode.window.showTextDocument(document);
-
-      let success = true;
-      await editor.edit(editBuilder => {
-        for (const { search, replace } of edits) {
-          const text = document.getText();
-
-          let startIdx = text.indexOf(search);
-
-          if (startIdx === -1) {
-            const normalizedDoc = text.replace(/\r\n/g, "\n");
-            const normalizedSearch = search.replace(/\r\n/g, "\n");
-
-            startIdx = normalizedDoc.indexOf(normalizedSearch);
-          }
-          if (startIdx !== -1) {
-            const startPos = document.positionAt(startIdx);
-            const endPos = document.positionAt(startIdx + search.length);
-            editBuilder.replace(new vscode.Range(startPos, endPos), replace);
-          } else {
-            success = false;
-            console.warn(`Search block not found: ${search.substring(0, 100)}...`);
-          }
-        }
-      });
-
-      const msg = success
-        ? `✅ Applied edits to ${targetPath}`
-        : `⚠️ Partially applied edits to ${targetPath} (some blocks not found)`;
-
-      webviewView.webview.postMessage({ command: 'response', text: msg });
-      await document.save();
-      return true;
-    } catch (err: any) {
-      webviewView.webview.postMessage({ command: 'response', text: `❌ Edit failed: ${err.message}` });
-      return true;
-    }
-  }
-
-  private resolvePath(rawPath: string): string {
-    if (rawPath.includes(':') || rawPath.startsWith('/')) return rawPath;
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (workspaceRoot) {
-      return vscode.Uri.joinPath(vscode.Uri.file(workspaceRoot), rawPath).fsPath;
-    }
-    return rawPath;
+    return html;
   }
 
   private getNonce() {
