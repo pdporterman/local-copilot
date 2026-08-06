@@ -1,5 +1,5 @@
-import { AgentType, AgentRequest, AgentResponse } from "../../../packages/shared/src/types";
-import { ChatAgent } from "../../../packages/agents/src/ChatAgent";
+import { AgentType, AgentRequest, AgentResponse } from "../../../../packages/shared/src/types";
+import { ChatAgent } from "../../../../packages/agents/src/ChatAgent";
 
 export class AgentRouter {
 

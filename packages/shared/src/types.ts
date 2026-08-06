@@ -24,6 +24,7 @@ export interface AgentResponse {
 export enum AgentType {
     CHAT = "chat",
     EDIT = "edit",
+    CREATE = "create",
     TEST = "test",
     REFACTOR = "refactor"
 }
